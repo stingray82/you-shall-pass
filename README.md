@@ -2,7 +2,7 @@
 
 Take control of WordPress.org repository updates.
 
-You Shall Pass** is a lightweight WordPress plugin that
+**You Shall Pass** is a lightweight WordPress plugin that
 retrieves update metadata directly from WordPress.org and injects
 updates into the native WordPress update system using the [Universal
 Updater Drop-In (UUPD)](https://github.com/stingray82/UUPD).
@@ -141,6 +141,8 @@ This project is not affiliated with or endorsed by WordPress.org,
 Automattic, or the WordPress Foundation.
 
 WordPress is a trademark of the WordPress Foundation.
+
+
 
 ------------------------------------------------------------------------
 
