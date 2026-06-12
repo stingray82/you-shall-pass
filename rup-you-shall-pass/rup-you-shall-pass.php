@@ -2,7 +2,7 @@
 /**
  * Plugin Name: You Shall Pass
  * Description: Bypass Protect the Shire!
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author:            ReallyUsefulPlugins.com
  * Author URI:        https://Reallyusefulplugins.com
  * Text Domain: rup-you-shall-pass
@@ -44,6 +44,8 @@ final class RUP_You_Shall_Pass {
 		add_action( 'rest_api_init', [ $this, 'register_rest_routes' ] );
 		add_action( 'admin_menu', [ $this, 'admin_menu' ] );
 		add_action( 'admin_init', [ $this, 'handle_save' ] );
+		add_action( 'admin_post_rup_ysp_clear_cache', [ $this, 'handle_clear_cache' ] );
+		add_action( 'admin_bar_menu', [ $this, 'admin_bar_menu' ], 100 );
 		add_action( 'admin_init', [ $this, 'register_all_selected_updaters' ], 20 );
 	}
 
@@ -52,6 +54,7 @@ final class RUP_You_Shall_Pass {
 			'mode'             => 'selected', // all|selected. Default is selected with nothing selected, so the plugin is off by default.
 			'selected_plugins' => [],
 			'selected_themes'  => [],
+			'show_admin_bar'  => false,
 		];
 	}
 
@@ -64,6 +67,7 @@ final class RUP_You_Shall_Pass {
 		$settings['mode'] = in_array( $settings['mode'], [ 'all', 'selected' ], true ) ? $settings['mode'] : 'selected';
 		$settings['selected_plugins'] = array_values( array_filter( array_map( 'sanitize_text_field', (array) $settings['selected_plugins'] ) ) );
 		$settings['selected_themes']  = array_values( array_filter( array_map( 'sanitize_key', (array) $settings['selected_themes'] ) ) );
+		$settings['show_admin_bar']  = ! empty( $settings['show_admin_bar'] );
 		return $settings;
 	}
 
@@ -97,18 +101,103 @@ final class RUP_You_Shall_Pass {
 		$selected_themes = isset( $_POST['selected_themes'] ) ? (array) wp_unslash( $_POST['selected_themes'] ) : [];
 		$selected_themes = array_values( array_filter( array_map( 'sanitize_key', $selected_themes ) ) );
 
+		$show_admin_bar = ! empty( $_POST['show_admin_bar'] );
+
 		update_option( self::OPTION, [
 			'mode'             => $mode,
 			'selected_plugins' => $selected_plugins,
 			'selected_themes'  => $selected_themes,
+			'show_admin_bar'  => $show_admin_bar,
 		], false );
 
-		// Clear native update caches so the new targeting applies quickly.
-		delete_site_transient( 'update_plugins' );
-		delete_site_transient( 'update_themes' );
+		// Clear native and YSP/UUPD caches so the new targeting applies quickly.
+		$this->clear_update_caches();
 
 		wp_safe_redirect( add_query_arg( 'rup_ysp_saved', '1', wp_get_referer() ?: admin_url( 'options-general.php?page=rup-you-shall-pass' ) ) );
 		exit;
+	}
+
+	private function cache_ttl() {
+		/**
+		 * Controls how long WordPress.org metadata is cached by You Shall Pass.
+		 *
+		 * Default: 6 hours.
+		 */
+		$ttl = (int) apply_filters( 'rup_ysp_cache_ttl', 6 * HOUR_IN_SECONDS );
+		return max( 0, $ttl );
+	}
+
+	private function metadata_cache_key( $type, $slug ) {
+		return 'rup_ysp_' . sanitize_key( $type ) . '_' . sanitize_key( $slug );
+	}
+
+	private function get_cached_metadata( $type, $slug ) {
+		$ttl = $this->cache_ttl();
+		if ( $ttl <= 0 ) {
+			return false;
+		}
+		return get_site_transient( $this->metadata_cache_key( $type, $slug ) );
+	}
+
+	private function set_cached_metadata( $type, $slug, $metadata ) {
+		$ttl = $this->cache_ttl();
+		if ( $ttl <= 0 ) {
+			return;
+		}
+		set_site_transient( $this->metadata_cache_key( $type, $slug ), $metadata, $ttl );
+	}
+
+	public function clear_update_caches() {
+		global $wpdb;
+
+		delete_site_transient( 'update_plugins' );
+		delete_site_transient( 'update_themes' );
+
+		// Clear You Shall Pass WordPress.org metadata caches.
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_site_transient_rup_ysp_%' OR option_name LIKE '_site_transient_timeout_rup_ysp_%'" );
+
+		// Clear UUPD caches created for this plugin's vendor (`rup`).
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_uupd_rup__%' OR option_name LIKE '_transient_timeout_uupd_rup__%'" );
+	}
+
+	public function handle_clear_cache() {
+		if ( ! current_user_can( 'update_plugins' ) && ! current_user_can( 'update_themes' ) ) {
+			wp_die( esc_html__( 'You do not have permission to refresh updates.', 'rup-you-shall-pass' ) );
+		}
+
+		check_admin_referer( 'rup_ysp_clear_cache' );
+		$this->clear_update_caches();
+
+		wp_update_plugins();
+		wp_update_themes();
+
+		$redirect = wp_get_referer() ?: admin_url( 'options-general.php?page=rup-you-shall-pass' );
+		wp_safe_redirect( add_query_arg( 'rup_ysp_cache_cleared', '1', $redirect ) );
+		exit;
+	}
+
+	private function clear_cache_url() {
+		return wp_nonce_url( admin_url( 'admin-post.php?action=rup_ysp_clear_cache' ), 'rup_ysp_clear_cache' );
+	}
+
+	public function admin_bar_menu( $wp_admin_bar ) {
+		if ( ! is_admin_bar_showing() || ( ! current_user_can( 'update_plugins' ) && ! current_user_can( 'update_themes' ) ) ) {
+			return;
+		}
+
+		$settings = self::settings();
+		if ( empty( $settings['show_admin_bar'] ) ) {
+			return;
+		}
+
+		$wp_admin_bar->add_node( [
+			'id'    => 'rup-ysp-check-palantir',
+			'title' => 'Check the Palantír',
+			'href'  => $this->clear_cache_url(),
+			'meta'  => [
+				'title' => 'Clear You Shall Pass caches and check updates',
+			],
+		] );
 	}
 
 	private function get_plugins() {
@@ -240,6 +329,11 @@ final class RUP_You_Shall_Pass {
 
 	public function rest_plugin_metadata( WP_REST_Request $request ) {
 		$slug = sanitize_key( $request['slug'] );
+		$cached = $this->get_cached_metadata( 'plugin', $slug );
+		if ( false !== $cached ) {
+			return rest_ensure_response( $cached );
+		}
+
 		$url  = sprintf( 'https://api.wordpress.org/plugins/info/1.0/%s.json', rawurlencode( $slug ) );
 		$response = wp_remote_get( $url, [ 'timeout' => 15, 'headers' => [ 'Accept' => 'application/json' ] ] );
 		if ( is_wp_error( $response ) ) {
@@ -254,11 +348,18 @@ final class RUP_You_Shall_Pass {
 		if ( ! is_array( $meta ) || empty( $meta['version'] ) ) {
 			return new WP_Error( 'rup_ysp_wporg_not_found', 'No plugin metadata found for ' . $slug, [ 'status' => 404 ] );
 		}
-		return rest_ensure_response( $this->normalize_plugin_metadata( $meta ) );
+		$normalized = $this->normalize_plugin_metadata( $meta );
+		$this->set_cached_metadata( 'plugin', $slug, $normalized );
+		return rest_ensure_response( $normalized );
 	}
 
 	public function rest_theme_metadata( WP_REST_Request $request ) {
 		$slug = sanitize_key( $request['slug'] );
+		$cached = $this->get_cached_metadata( 'theme', $slug );
+		if ( false !== $cached ) {
+			return rest_ensure_response( $cached );
+		}
+
 		$url  = add_query_arg( [
 			'action' => 'theme_information',
 			'request' => [
@@ -284,7 +385,9 @@ final class RUP_You_Shall_Pass {
 		if ( ! is_array( $meta ) || empty( $meta['version'] ) ) {
 			return new WP_Error( 'rup_ysp_wporg_not_found', 'No theme metadata found for ' . $slug, [ 'status' => 404 ] );
 		}
-		return rest_ensure_response( $this->normalize_theme_metadata( $meta, $slug ) );
+		$normalized = $this->normalize_theme_metadata( $meta, $slug );
+		$this->set_cached_metadata( 'theme', $slug, $normalized );
+		return rest_ensure_response( $normalized );
 	}
 
 	private function normalize_plugin_metadata( array $m ) {
@@ -346,12 +449,16 @@ final class RUP_You_Shall_Pass {
 			<?php if ( isset( $_GET['rup_ysp_saved'] ) ) : ?>
 				<div class="notice notice-success is-dismissible"><p>Settings saved. WordPress update caches were cleared.</p></div>
 			<?php endif; ?>
+			<?php if ( isset( $_GET['rup_ysp_cache_cleared'] ) ) : ?>
+				<div class="notice notice-success is-dismissible"><p>The Palantír was checked. You Shall Pass, UUPD, and WordPress update caches were cleared and update checks were refreshed.</p></div>
+			<?php endif; ?>
 
 			<?php if ( 'selected' === $settings['mode'] && empty( $settings['selected_plugins'] ) && empty( $settings['selected_themes'] ) ) : ?>
 				<div class="notice notice-info"><p><strong>You Shall Pass is currently inactive.</strong> No plugins or themes are selected, so no update overrides will run.</p></div>
 			<?php endif; ?>
 
-			<p>You Shall Pass is off by default. It only registers update overrides for individually selected plugins/themes, unless you deliberately switch to all-items mode. It uses UUPD to serve normalised metadata from WordPress.org repository APIs into the native dashboard update system.</p>
+			<p>You Shall Pass is off by default. It only registers update overrides for individually selected plugins/themes, unless you deliberately switch to all-items mode. It uses UUPD to serve normalized metadata from WordPress.org repository APIs into the native dashboard update system.</p>
+			<p><a class="button button-secondary" href="<?php echo esc_url( $this->clear_cache_url() ); ?>">Check the Palantír</a> <span class="description">Clears YSP/UUPD/native update caches and forces a fresh update check. WordPress.org metadata is cached for <?php echo esc_html( human_time_diff( 0, $this->cache_ttl() ) ); ?> by default.</span></p>
 
 			<h2>Developer Filters</h2>
 			<p>Automated setups can enable targeting without changing the saved UI settings:</p>
@@ -363,7 +470,11 @@ add_filter( 'rup_ysp_selected_theme_slugs', function( $slugs ) {
     return array_merge( $slugs, [ 'astra' ] );
 } );
 
-add_filter( 'rup_ysp_apply_all_updates', '__return_true' );</code></pre>
+add_filter( 'rup_ysp_apply_all_updates', '__return_true' );
+
+add_filter( 'rup_ysp_cache_ttl', function() {
+    return 6 * HOUR_IN_SECONDS;
+} );</code></pre>
 
 			<form method="post" action="<?php echo esc_url( admin_url( 'options-general.php?page=rup-you-shall-pass' ) ); ?>">
 				<?php wp_nonce_field( self::NONCE ); ?>
@@ -376,6 +487,12 @@ add_filter( 'rup_ysp_apply_all_updates', '__return_true' );</code></pre>
 						<td>
 							<label><input type="radio" name="mode" value="selected" <?php checked( $settings['mode'], 'selected' ); ?> /> Only selected plugins and themes below (default/off until selections are made)</label><br />
 							<label><input type="radio" name="mode" value="all" <?php checked( $settings['mode'], 'all' ); ?> /> All installed plugins and themes</label>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row">Admin bar shortcut</th>
+						<td>
+							<label><input type="checkbox" name="show_admin_bar" value="1" <?php checked( ! empty( $settings['show_admin_bar'] ) ); ?> /> Show “Check the Palantír” in the admin bar</label>
 						</td>
 					</tr>
 				</table>

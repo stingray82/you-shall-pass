@@ -92,6 +92,16 @@ add_filter('rup_ysp_selected_theme_slugs', function ($slugs) {
 });
 ```
 
+### Adjust caching
+
+```php
+add_filter( 'rup_ysp_cache_ttl', function() {
+    return 6 * HOUR_IN_SECONDS;
+} );
+```
+
+
+
 ------------------------------------------------------------------------
 
 ## How It Works
